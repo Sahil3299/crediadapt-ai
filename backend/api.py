@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 import re
 import sys
+import logging
+from html import escape
+from io import BytesIO
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,13 +15,24 @@ from typing import Annotated, Any, Literal, Optional
 
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
+from fastapi.responses import StreamingResponse
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
+MODEL_VERSION = "1.0.0"
+POLICY_VERSION = "1.0.0"
 sys.path.insert(0, str(BASE_DIR))
 os.chdir(BASE_DIR)
 load_dotenv(BASE_DIR / ".env")
@@ -149,6 +163,51 @@ class LoginRequest(BaseModel):
         return value.lower()
 
 
+class CounterOffer(BaseModel):
+    amount: float = Field(..., gt=0)
+    tenure_months: int = Field(..., ge=6, le=84)
+    interest_rate: float = Field(..., gt=0, le=100)
+
+
+class DecisionRequest(BaseModel):
+    action: Literal["approve", "reject", "counter_offer", "request_info"]
+    reason: str = Field(..., min_length=1, max_length=2000)
+    counter_offer: CounterOffer | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("A reason is required.")
+        return normalized
+
+
+class ApplicantResponse(BaseModel):
+    action: Literal["provide_info", "accept_counter_offer", "decline_counter_offer"]
+    message: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class WithdrawalRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
 class AuthResponse(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
@@ -182,6 +241,45 @@ def fallback_explanation(
         "affordability_rationale": f"Existing obligations plus the proposed EMI of {inr(emi)} give a FOIR of {pct(final_foir)} against the maximum permitted {pct(max_foir)}.",
         "risk_and_pricing_rationale": f"The model places this application in the {risk_band} risk band with a modelled default probability of {pct(default_prob)}. Concessions applied total {total_discount}% off the {base_rate}% base rate.",
         "smart_prepayment_strategy": f"Closing in month {closure_month} leaves an outstanding principal of {inr(outstanding_principal)} and saves approximately {inr(interest_saved)} in interest.",
+    }
+
+
+def explanation_missing_figures(
+    explanation: dict[str, str],
+    recommended_loan: float,
+    interest_rate: float,
+    emi: float,
+    foir: float,
+    is_eligible: bool,
+    requested_loan: float,
+    requested_foir: float,
+) -> list[str]:
+    text = " ".join(explanation.values()).replace(",", "")
+    numbers = [
+        float(token.rstrip("%"))
+        for token in re.findall(r"(?<!\d)\d+(?:\.\d+)?%?(?!\d)", text)
+    ]
+    expected = (
+        [
+            ("recommended loan", recommended_loan),
+            ("interest rate", interest_rate),
+            ("EMI", emi),
+            ("FOIR", foir * 100),
+        ]
+        if is_eligible
+        else [("requested loan", requested_loan), ("FOIR", requested_foir * 100)]
+    )
+    return [
+        label
+        for label, value in expected
+        if not any(abs(number - round(value, 2)) <= 0.01 for number in numbers)
+    ]
+
+
+def normalize_narrative_currency(explanation: dict[str, str]) -> dict[str, str]:
+    return {
+        key: re.sub(r"\bINR\s*(?=[\d,])|\?(?=\s?[\d,])", "₹", value)
+        for key, value in explanation.items()
     }
 
 
@@ -256,13 +354,49 @@ def evaluate_application(req: LoanRequest) -> dict[str, Any]:
         emi, risk_band, default_prob, total_discount, 11.5, req.early_closure_month,
         outstanding_principal, interest_saved,
     )
+    explanation = normalize_narrative_currency(explanation)
+    missing_figures = explanation_missing_figures(
+        explanation, adjusted_loan, final_rate if is_eligible else 0.0, emi,
+        calculated_foir if is_eligible else requested_foir, is_eligible,
+        req.requested_loan, requested_foir,
+    )
+    if missing_figures:
+        logger.warning("AI explanation omitted computed figures: %s", ", ".join(missing_figures))
+        explanation = fallback_explanation(
+            is_eligible, decision_type, req.requested_loan, adjusted_loan, adjusted_tenure,
+            final_rate if is_eligible else 0.0, requested_foir, calculated_foir, 0.60, reason,
+            emi, risk_band, default_prob, total_discount, 11.5, req.early_closure_month,
+            outstanding_principal, interest_saved,
+        )
     total_interest = simulation_result.get("total_interest", 0.0)
     total_cost = simulation_result.get("total_cost", 0.0)
+    eligibility_path = None
+    if decision_type == "COUNTER_OFFER":
+        requested_emi = aff_agent.calculate_emi(
+            req.requested_loan, aff_agent.benchmark_rate, req.requested_tenure,
+        )
+        current_obligations = req.house_rent + req.existing_emi
+        total_requested_obligation = current_obligations + requested_emi
+        permitted_obligation = req.monthly_income * aff_agent.max_foir
+        emi_gap = max(0.0, total_requested_obligation - permitted_obligation)
+        available_emi = max(0.0, permitted_obligation - current_obligations)
+        eligibility_path = {
+            "monthly_existing_emi_to_close": round(min(req.existing_emi, emi_gap), 2),
+            "additional_monthly_income_needed": round(
+                max(0.0, total_requested_obligation / aff_agent.max_foir - req.monthly_income), 2,
+            ),
+            "maximum_loan_available_today": round(
+                aff_agent.calculate_max_loan(
+                    available_emi, aff_agent.benchmark_rate, max(1, adjusted_tenure),
+                ), 2,
+            ),
+        }
     return {
         "applicant": {"customer_id": profile.customer_id, "monthly_income": profile.monthly_income, "age": profile.age, "gender": profile.gender, "house_rent": profile.house_rent, "existing_emi": profile.existing_emi, "cibil_score": profile.cibil_score},
         "requested": {"loan_amount": req.requested_loan, "tenure_months": req.requested_tenure, "early_closure_month": req.early_closure_month},
         "decision_type": decision_type, "is_eligible": is_eligible, "eligibility_message": eligibility_message,
         "reason": reason, "requested_foir": round(requested_foir, 4), "final_foir": round(calculated_foir, 4),
+        "eligibility_path": eligibility_path,
         "max_foir": 0.60, "recommended_loan": adjusted_loan, "recommended_tenure": adjusted_tenure,
         "interest_rate": final_rate if is_eligible else 0.0, "base_rate": 11.5, "emi": emi,
         "risk": {"evaluated": is_eligible, "risk_band": risk_band, "default_probability": default_prob, "shap_factors": shap_factors, "message": risk_result.get("message")},
@@ -279,6 +413,7 @@ def evaluate_application(req: LoanRequest) -> dict[str, Any]:
             "schedule_preview": [],
         },
         "explanation": explanation, "engine_source": "python_multi_agent",
+        "model_version": MODEL_VERSION,
     }
 
 
@@ -291,9 +426,10 @@ def auth_response(user: dict) -> AuthResponse:
 
 
 def set_refresh_cookie(response: Response, token: str) -> None:
+    secure = os.getenv("COOKIE_SECURE", "false").lower() == "true"
     response.set_cookie(
         key="crediadapt_refresh", value=token, httponly=True,
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", samesite="lax",
+        secure=secure, samesite="none" if secure else "lax",
         max_age=REFRESH_TOKEN_DAYS * 24 * 60 * 60, path="/api/auth",
     )
 
@@ -302,7 +438,7 @@ def audit(action: str, application_id: str | None, actor: CurrentUser, details: 
     get_database().audit_logs.insert_one({
         "timestamp": datetime.now(UTC), "actor_id": actor.id, "actor_role": actor.role,
         "action": action, "application_id": application_id, "details": details or {},
-        "model_version": "1.0.0", "policy_version": "1.0.0",
+        "model_version": MODEL_VERSION, "policy_version": POLICY_VERSION,
     })
 
 
@@ -331,6 +467,116 @@ def check_application_access(application: dict, user: CurrentUser) -> None:
 
 def serialize_application(document: dict) -> dict[str, Any]:
     return {key: value for key, value in document.items() if key != "_id"} | {"id": str(document["_id"])}
+
+
+def inr_indian(value: float | int) -> str:
+    rounded = str(int(round(value)))
+    if len(rounded) <= 3:
+        return f"₹{rounded}"
+    tail = rounded[-3:]
+    head = rounded[:-3]
+    groups = []
+    while head:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    return f"₹{','.join(groups)},{tail}"
+
+
+def register_report_font() -> str:
+    font_name = "CrediAdaptReport"
+    if font_name in pdfmetrics.getRegisteredFontNames():
+        return font_name
+    font_candidates = [
+        os.getenv("CREDIADAPT_PDF_FONT"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for candidate in font_candidates:
+        if candidate and Path(candidate).is_file():
+            pdfmetrics.registerFont(TTFont(font_name, candidate))
+            return font_name
+    raise RuntimeError(
+        "No PDF font with rupee-symbol support was found. Install DejaVu Sans or set CREDIADAPT_PDF_FONT."
+    )
+
+
+STATUS_TRANSITIONS = {
+    ("SUBMITTED", "UNDER_REVIEW", "officer"),
+    ("SUBMITTED", "WITHDRAWN", "applicant"),
+    ("UNDER_REVIEW", "APPROVED", "officer"),
+    ("UNDER_REVIEW", "REJECTED", "officer"),
+    ("UNDER_REVIEW", "COUNTER_OFFERED", "officer"),
+    ("UNDER_REVIEW", "INFO_REQUESTED", "officer"),
+    ("INFO_REQUESTED", "UNDER_REVIEW", "applicant"),
+    ("INFO_REQUESTED", "WITHDRAWN", "applicant"),
+    ("COUNTER_OFFERED", "ACCEPTED", "applicant"),
+    ("COUNTER_OFFERED", "WITHDRAWN", "applicant"),
+}
+
+
+def transition_application(
+    application: dict,
+    target_status: str,
+    actor: CurrentUser,
+    reason: str,
+    action: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    previous_status = application["status"]
+    if (previous_status, target_status, actor.role) not in STATUS_TRANSITIONS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot transition application from {previous_status} to {target_status}.",
+        )
+
+    now = datetime.now(UTC)
+    history_entry = {
+        "from": previous_status, "to": target_status, "by": actor.id,
+        "role": actor.role, "reason": reason, "at": now,
+    }
+    update_fields: dict[str, Any] = {"status": target_status, "updated_at": now}
+    if details and "assigned_officer_id" in details:
+        update_fields["assigned_officer_id"] = details["assigned_officer_id"]
+    if details and "counter_offer" in details:
+        update_fields["counter_offer"] = details["counter_offer"]
+    if details and "message" in details and details["message"]:
+        update_fields["applicant_response"] = details["message"]
+    updated = get_database().applications.update_one(
+        {"_id": application["_id"], "status": previous_status},
+        {"$set": update_fields, "$push": {"status_history": history_entry}},
+    )
+    if updated.matched_count != 1:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Application status changed; reload and try again.")
+
+    audit_details = {"from": previous_status, "to": target_status}
+    if details:
+        audit_details.update({
+            key: details[key]
+            for key in ("action", "applicant_action", "counter_offer", "assigned_officer_id")
+            if key in details
+        })
+    audit(action, str(application["_id"]), actor, audit_details)
+    recipient_id = (
+        application["applicant_id"]
+        if actor.role == "officer"
+        else application.get("assigned_officer_id")
+    )
+    if recipient_id and recipient_id != actor.id:
+        message = (
+            f"Your application {application['reference']} is now {target_status.replace('_', ' ').lower()}."
+            if actor.role == "officer"
+            else f"Applicant responded to {application['reference']}; status is now {target_status.replace('_', ' ').lower()}."
+        )
+        get_database().notifications.insert_one({
+            "user_id": recipient_id,
+            "application_id": str(application["_id"]),
+            "message": message,
+            "read": False,
+            "created_at": now,
+        })
+    return serialize_application(get_application(str(application["_id"])))
 
 
 @app.get("/api/health")
@@ -429,10 +675,371 @@ def applications(current_user: Annotated[CurrentUser, Depends(get_current_user)]
 
 
 @app.get("/api/officer/queue")
-def officer_queue(current_user: Annotated[CurrentUser, Depends(require_role("officer"))]):
-    """Phase 1 role-protected queue; filters and review actions follow in Phase 2."""
-    documents = get_database().applications.find({}).sort("created_at", -1)
-    return {"items": [serialize_application(document) for document in documents]}
+def officer_queue(
+    current_user: Annotated[CurrentUser, Depends(require_role("officer"))],
+    application_status: Annotated[str | None, Query(alias="status")] = None,
+    risk_band: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    search: str | None = None,
+):
+    query = {"status": application_status} if application_status else {}
+    documents = list(get_database().applications.find(query).sort("created_at", -1))
+    normalized_search = search.strip().lower() if search else None
+    filtered = []
+    for document in documents:
+        if risk_band and document.get("result", {}).get("risk", {}).get("risk_band") != risk_band.upper():
+            continue
+        created_at = document.get("created_at")
+        if date_from and (not created_at or created_at < date_from):
+            continue
+        if date_to and (not created_at or created_at > date_to):
+            continue
+        applicant = get_database().users.find_one({"_id": ObjectId(document["applicant_id"])})
+        if normalized_search:
+            searchable = " ".join(
+                [document.get("reference", ""), applicant.get("email", "") if applicant else "",
+                 applicant.get("full_name", "") if applicant else ""]
+            ).lower()
+            if normalized_search not in searchable:
+                continue
+        filtered.append(serialize_application(document) | {
+            "applicant_name": applicant.get("full_name") if applicant else None,
+            "applicant_email": applicant.get("email") if applicant else None,
+        })
+    return {"items": filtered}
+
+
+@app.get("/api/officer/analytics")
+def officer_analytics(current_user: Annotated[CurrentUser, Depends(require_role("officer"))]):
+    applications = list(get_database().applications.find({}))
+    status_counts: dict[str, int] = {}
+    risk_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "NOT_EVALUATED": 0}
+    risk_outcomes: dict[str, dict[str, int]] = {}
+    decision_durations: list[float] = []
+    for application in applications:
+        application_status = application.get("status", "UNKNOWN")
+        status_counts[application_status] = status_counts.get(application_status, 0) + 1
+        risk = application.get("result", {}).get("risk", {}).get("risk_band", "NOT_EVALUATED")
+        risk_counts[risk] = risk_counts.get(risk, 0) + 1
+        if application_status in {"APPROVED", "ACCEPTED", "REJECTED"}:
+            outcomes = risk_outcomes.setdefault(risk, {"approved": 0, "rejected": 0})
+            outcomes["rejected" if application_status == "REJECTED" else "approved"] += 1
+        decision_entry = next(
+            (
+                entry for entry in application.get("status_history", [])
+                if entry.get("to") in {"APPROVED", "REJECTED", "COUNTER_OFFERED"}
+            ),
+            None,
+        )
+        if decision_entry and application.get("created_at") and decision_entry.get("at"):
+            duration = (decision_entry["at"] - application["created_at"]).total_seconds() / 3600
+            decision_durations.append(max(0.0, duration))
+    approved = status_counts.get("APPROVED", 0) + status_counts.get("ACCEPTED", 0)
+    declined = status_counts.get("REJECTED", 0)
+    final_decisions = approved + declined
+    approval_rate_by_risk = {
+        risk: round(values["approved"] / (values["approved"] + values["rejected"]), 4)
+        if values["approved"] + values["rejected"] else None
+        for risk, values in risk_outcomes.items()
+    }
+    return {
+        "total_applications": len(applications),
+        "status_counts": status_counts,
+        "risk_mix": risk_counts,
+        "approval_rate": round(approved / final_decisions, 4) if final_decisions else None,
+        "approval_rate_by_risk": approval_rate_by_risk,
+        "average_hours_to_decision": round(sum(decision_durations) / len(decision_durations), 2)
+        if decision_durations else None,
+    }
+
+
+@app.get("/api/officer/applications/{application_id}")
+def officer_application(
+    application_id: str,
+    current_user: Annotated[CurrentUser, Depends(require_role("officer"))],
+):
+    application = get_application(application_id)
+    applicant = get_database().users.find_one({"_id": ObjectId(application["applicant_id"])})
+    return {
+        "application": serialize_application(application),
+        "applicant": public_user(applicant).model_dump() if applicant else None,
+    }
+
+
+@app.post("/api/officer/applications/{application_id}/start-review")
+def start_review(
+    application_id: str,
+    current_user: Annotated[CurrentUser, Depends(require_role("officer"))],
+):
+    application = get_application(application_id)
+    updated = transition_application(
+        application, "UNDER_REVIEW", current_user, "Officer started review.",
+        "application_review_started", {"assigned_officer_id": current_user.id},
+    )
+    get_database().reviews.insert_one({
+        "application_id": application_id, "officer_id": current_user.id,
+        "action": "start_review", "reason": "Officer started review.",
+        "created_at": datetime.now(UTC),
+    })
+    return updated
+
+
+@app.post("/api/officer/applications/{application_id}/decision")
+def officer_decision(
+    application_id: str,
+    payload: DecisionRequest,
+    current_user: Annotated[CurrentUser, Depends(require_role("officer"))],
+):
+    application = get_application(application_id)
+    target_status = {
+        "approve": "APPROVED",
+        "reject": "REJECTED",
+        "counter_offer": "COUNTER_OFFERED",
+        "request_info": "INFO_REQUESTED",
+    }[payload.action]
+    if payload.action == "counter_offer" and payload.counter_offer is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Counter-offer terms are required.")
+    if payload.action != "counter_offer" and payload.counter_offer is not None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Counter-offer terms are only valid for a counter-offer.")
+    expected_action = {
+        "APPROVED_AS_REQUESTED": "approve",
+        "COUNTER_OFFER": "counter_offer",
+        "REJECTED": "reject",
+    }.get(application.get("result", {}).get("decision_type"))
+    if payload.action in {"approve", "reject", "counter_offer"} and payload.action != expected_action and not payload.reason:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A written reason is required when the decision differs from the AI recommendation.")
+
+    details: dict[str, Any] = {"action": payload.action}
+    if payload.counter_offer:
+        details["counter_offer"] = payload.counter_offer.model_dump()
+    updated = transition_application(
+        application, target_status, current_user, payload.reason,
+        "application_decision", details,
+    )
+    get_database().reviews.insert_one({
+        "application_id": application_id, "officer_id": current_user.id,
+        "action": payload.action, "reason": payload.reason,
+        "counter_offer": payload.counter_offer.model_dump() if payload.counter_offer else None,
+        "created_at": datetime.now(UTC),
+    })
+    return updated
+
+
+@app.post("/api/applications/{application_id}/respond")
+def applicant_response(
+    application_id: str,
+    payload: ApplicantResponse,
+    current_user: Annotated[CurrentUser, Depends(require_role("applicant"))],
+):
+    application = get_application(application_id)
+    check_application_access(application, current_user)
+    if payload.action == "provide_info":
+        if application["status"] != "INFO_REQUESTED":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This application is not waiting for information.")
+        if not payload.message:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Provide a response to the officer's information request.")
+        target_status, reason = "UNDER_REVIEW", payload.message
+    elif payload.action == "accept_counter_offer":
+        target_status, reason = "ACCEPTED", "Applicant accepted the counter-offer."
+    else:
+        target_status, reason = "WITHDRAWN", "Applicant declined the counter-offer."
+    updated = transition_application(
+        application, target_status, current_user, reason, "applicant_response",
+        {"message": payload.message, "applicant_action": payload.action},
+    )
+    get_database().reviews.insert_one({
+        "application_id": application_id, "officer_id": None,
+        "action": payload.action,
+        "reason": "Applicant provided requested information." if payload.action == "provide_info" else reason,
+        "created_at": datetime.now(UTC),
+    })
+    return updated
+
+
+@app.post("/api/applications/{application_id}/withdraw")
+def withdraw_application(
+    application_id: str,
+    payload: WithdrawalRequest,
+    current_user: Annotated[CurrentUser, Depends(require_role("applicant"))],
+):
+    application = get_application(application_id)
+    check_application_access(application, current_user)
+    return transition_application(
+        application, "WITHDRAWN", current_user, payload.reason or "Applicant withdrew the application.",
+        "application_withdrawn",
+    )
+
+
+@app.get("/api/applications/{application_id}/report.pdf")
+def application_report(
+    application_id: str,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+):
+    application = get_application(application_id)
+    check_application_access(application, current_user)
+    font_name = register_report_font()
+    result = application["result"]
+    applicant = get_database().users.find_one({"_id": ObjectId(application["applicant_id"])})
+    buffer = BytesIO()
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle", parent=styles["Title"], fontName=font_name, fontSize=20,
+        leading=25, textColor=colors.HexColor("#0f3f53"), alignment=TA_CENTER,
+    )
+    heading_style = ParagraphStyle(
+        "ReportHeading", parent=styles["Heading2"], fontName=font_name,
+        fontSize=12, leading=16, textColor=colors.HexColor("#0f3f53"),
+    )
+    body_style = ParagraphStyle(
+        "ReportBody", parent=styles["BodyText"], fontName=font_name,
+        fontSize=9, leading=13, spaceAfter=4,
+    )
+    cell_style = ParagraphStyle("ReportCell", parent=body_style, spaceAfter=0)
+
+    def paragraph(value: Any, style: ParagraphStyle = body_style) -> Paragraph:
+        return Paragraph(escape(str(value)), style)
+
+    story = [
+        paragraph("CrediAdapt AI", title_style),
+        paragraph("Loan assessment report", heading_style),
+        paragraph(f"Reference: {application['reference']}"),
+        paragraph(f"Generated: {datetime.now(UTC).strftime('%d %B %Y, %H:%M UTC')}"),
+        paragraph(f"Applicant: {applicant.get('full_name', 'Applicant') if applicant else 'Applicant'}"),
+        Spacer(1, 10),
+        paragraph("Loan and affordability", heading_style),
+    ]
+    financial_rows = [
+        [paragraph("Measure", cell_style), paragraph("Value", cell_style)],
+        [paragraph("Requested loan", cell_style), paragraph(inr_indian(result["requested"]["loan_amount"]), cell_style)],
+        [paragraph("Recommended loan", cell_style), paragraph(inr_indian(result["recommended_loan"]), cell_style)],
+        [paragraph("Requested / recommended tenure", cell_style), paragraph(
+            f"{result['requested']['tenure_months']} / {result['recommended_tenure']} months", cell_style
+        )],
+        [paragraph("Interest rate", cell_style), paragraph(f"{result['interest_rate']:.2f}%", cell_style)],
+        [paragraph("Monthly EMI", cell_style), paragraph(inr_indian(result["emi"]), cell_style)],
+        [paragraph("Total interest", cell_style), paragraph(inr_indian(result["simulation"]["total_interest"]), cell_style)],
+        [paragraph("FOIR / maximum", cell_style), paragraph(
+            f"{result['final_foir'] * 100:.2f}% / {result['max_foir'] * 100:.0f}%", cell_style
+        )],
+    ]
+    table = Table(financial_rows, colWidths=[260, 230], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eaf3f6")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0f3f53")),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#d5e0e5")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.extend([table, Spacer(1, 10), paragraph("Risk assessment", heading_style)])
+    risk = result.get("risk", {})
+    story.append(paragraph(
+        f"Risk band: {risk.get('risk_band', 'Not evaluated')} · "
+        f"Modelled default probability: {risk.get('default_probability', 0) * 100:.2f}%"
+    ))
+    factors = risk.get("shap_factors", [])
+    story.append(paragraph(
+        "Main model factors: " + (
+            ", ".join(f"{factor.get('label', factor.get('feature', 'Factor'))} "
+                      f"({factor.get('direction', 'impact').replace('_', ' ')})" for factor in factors)
+            if factors else "No factors available."
+        )
+    ))
+    story.append(paragraph("Applied policies and concessions", heading_style))
+    policies = result.get("policies", [])
+    story.append(paragraph(
+        "; ".join(
+            f"{item.get('policy_name', 'Policy')} ({item.get('discount_percentage', 0)}%): "
+            f"{item.get('justification', '')}" for item in policies
+        ) if policies else "No policy concessions were applied."
+    ))
+    story.append(paragraph("Application status and review notes", heading_style))
+    story.append(paragraph(f"Current status: {application['status'].replace('_', ' ')}"))
+    history = application.get("status_history", [])
+    story.extend(
+        paragraph(
+            f"{entry.get('to', 'Update').replace('_', ' ')}: {entry.get('reason', '')}"
+        )
+        for entry in history
+        if entry.get("role") == "officer" and entry.get("reason")
+    )
+    story.append(paragraph("Early closure estimate", heading_style))
+    simulation = result["simulation"]
+    story.append(paragraph(
+        f"At month {simulation.get('closure_month', 0)}, estimated outstanding principal is "
+        f"{inr_indian(simulation.get('outstanding_principal', 0))}; estimated interest saved is "
+        f"{inr_indian(simulation.get('interest_saved', 0))}."
+    ))
+    story.append(paragraph("AI assessment summary", heading_style))
+    story.append(paragraph(result.get("explanation", {}).get("executive_summary", "")))
+    story.append(Spacer(1, 8))
+    story.append(paragraph(
+        "Disclaimer: Figures are indicative, based on self-reported information, and are not a loan approval or offer. "
+        f"Model version: {result.get('model_version', MODEL_VERSION)}."
+    ))
+    SimpleDocTemplate(
+        buffer, pagesize=A4, rightMargin=48, leftMargin=48, topMargin=42, bottomMargin=42,
+        title=f"CrediAdapt report {application['reference']}",
+        author="CrediAdapt AI",
+    ).build(story)
+    audit("application_report_downloaded", application_id, current_user, {"reference": application["reference"]})
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{application["reference"]}-report.pdf"'},
+    )
+
+
+@app.get("/api/audit")
+def get_audit_logs(
+    current_user: Annotated[CurrentUser, Depends(require_role("officer"))],
+    application_id: str | None = None,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    query = {"application_id": application_id} if application_id else {}
+    documents = list(get_database().audit_logs.find(query).sort("timestamp", -1))
+    start = (page - 1) * limit
+    return {
+        "items": [
+            {key: (str(value) if isinstance(value, ObjectId) else value) for key, value in item.items()}
+            for item in documents[start:start + limit]
+        ],
+        "page": page,
+        "limit": limit,
+        "total": len(documents),
+    }
+
+
+@app.get("/api/notifications")
+def get_notifications(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    documents = list(
+        get_database().notifications.find({"user_id": current_user.id}).sort("created_at", -1)
+    )[:limit]
+    return {"items": [serialize_application(item) for item in documents]}
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(
+    notification_id: str,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+):
+    if not ObjectId.is_valid(notification_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+    updated = get_database().notifications.update_one(
+        {"_id": ObjectId(notification_id), "user_id": current_user.id},
+        {"$set": {"read": True}},
+    )
+    if updated.matched_count != 1:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+    return {"success": True}
 
 
 @app.get("/api/explainability/{application_id}")
@@ -447,6 +1054,19 @@ def advisor(application_id: str, current_user: Annotated[CurrentUser, Depends(ge
     application = get_application(application_id)
     check_application_access(application, current_user)
     return {"application_id": application_id, "reference": application["reference"], "advisor": application["result"]["explanation"]}
+
+
+@app.get("/api/model/metrics")
+def model_metrics(current_user: Annotated[CurrentUser, Depends(require_role("officer"))]):
+    _, _, risk_engine, _, _, _ = get_agents()
+    if risk_engine is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Risk model metrics are unavailable.")
+    return {
+        "model_version": MODEL_VERSION,
+        "roc_auc": risk_engine.metrics["roc_auc"],
+        "test_samples": risk_engine.metrics["test_samples"],
+        "features": risk_engine.features,
+    }
 
 
 if __name__ == "__main__":

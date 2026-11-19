@@ -1,20 +1,5 @@
-import {
-  Bar,
-  BarChart,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
-  BadgePercent,
-  BrainCircuit,
-  FileText,
-  Info,
-  ScrollText,
-  Sparkles,
-} from "lucide-react";
+import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { BadgePercent, BrainCircuit, FileText, Info, ScrollText, Sparkles } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { LoanEvaluationResponse } from "@/lib/loan/types";
 import { DecisionBanner } from "./DecisionBanner";
@@ -44,9 +29,15 @@ function Metric({
             : "text-slate-900 dark:text-white";
   return (
     <div className="rounded-xl border border-slate-200/90 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]">
-      <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</p>
-      <p className={`mt-2 font-mono text-2xl sm:text-3xl font-bold leading-tight ${tone}`}>{value}</p>
-      {sub && <p className="mt-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400">{sub}</p>}
+      <p className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+        {label}
+      </p>
+      <p className={`mt-2 font-mono text-2xl sm:text-3xl font-bold leading-tight ${tone}`}>
+        {value}
+      </p>
+      {sub && (
+        <p className="mt-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400">{sub}</p>
+      )}
     </div>
   );
 }
@@ -55,7 +46,9 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-4 border-b border-slate-100 dark:border-slate-800/80 py-2.5 last:border-b-0">
       <span className="text-sm font-semibold text-slate-600 dark:text-slate-400">{label}</span>
-      <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">{value}</span>
+      <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">
+        {value}
+      </span>
     </div>
   );
 }
@@ -130,7 +123,11 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
               value={`${result.interest_rate.toFixed(2)}%`}
               sub={`Base ${result.base_rate}% · ${result.total_discount}% Concession`}
             />
-            <Metric label="Monthly EMI" value={inr(result.emi)} sub={`${result.recommended_tenure} Months Tenure`} />
+            <Metric
+              label="Monthly EMI"
+              value={inr(result.emi)}
+              sub={`${result.recommended_tenure} Months Tenure`}
+            />
             <Metric
               label="FOIR Utilisation"
               value={pct(result.final_foir)}
@@ -161,6 +158,35 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
             finalFoir={result.final_foir}
             maxFoir={result.max_foir}
           />
+          {result.decision_type === "COUNTER_OFFER" && result.eligibility_path && (
+            <section className="rounded-xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-900 dark:bg-sky-950/30">
+              <h3 className="font-bold text-slate-900 dark:text-slate-100">
+                Path to the requested amount
+              </h3>
+              <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                These estimates show what could bring the requested loan within the 60% FOIR
+                guideline.
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <Metric
+                  label="Existing EMI to close"
+                  value={inr(result.eligibility_path.monthly_existing_emi_to_close)}
+                  sub="Monthly obligation reduction"
+                />
+                <Metric
+                  label="Additional income needed"
+                  value={inr(result.eligibility_path.additional_monthly_income_needed)}
+                  sub="Per month"
+                />
+                <Metric
+                  label="Maximum available today"
+                  value={inr(result.eligibility_path.maximum_loan_available_today)}
+                  sub={`${result.recommended_tenure} month tenure`}
+                  accent="teal"
+                />
+              </div>
+            </section>
+          )}
         </>
       ) : (
         <div className="space-y-4">
@@ -175,13 +201,26 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
             maxFoir={result.max_foir}
           />
           <div className="rounded-xl border border-rose-200 bg-rose-50/50 p-6 shadow-sm dark:border-rose-900/60 dark:bg-rose-950/30">
-            <h3 className="text-lg font-bold text-rose-950 dark:text-rose-200">Underwriting Decline Rationale</h3>
-            <p className="mt-2 text-sm font-medium text-rose-900 dark:text-rose-300">{result.reason}</p>
-            <h4 className="mt-5 text-xs font-bold uppercase tracking-wider text-rose-800 dark:text-rose-400">Remediation Guidelines</h4>
+            <h3 className="text-lg font-bold text-rose-950 dark:text-rose-200">
+              Underwriting Decline Rationale
+            </h3>
+            <p className="mt-2 text-sm font-medium text-rose-900 dark:text-rose-300">
+              {result.reason}
+            </p>
+            <h4 className="mt-5 text-xs font-bold uppercase tracking-wider text-rose-800 dark:text-rose-400">
+              Remediation Guidelines
+            </h4>
             <ul className="mt-2 space-y-1.5 text-sm font-medium text-rose-900 dark:text-rose-300">
               <li>• Reduce the requested principal amount to fit within disposable income.</li>
-              <li>• Settle or consolidate existing EMI obligations to bring baseline FOIR below 60%.</li>
-              <li>• Extend loan tenure to lower the monthly instalment obligation.</li>
+              <li>
+                • Settle or consolidate existing EMI obligations to bring baseline FOIR below 60%.
+              </li>
+              {result.recommended_tenure < 84 && (
+                <li>
+                  • Consider a longer tenure, up to 84 months, to lower the monthly instalment
+                  obligation.
+                </li>
+              )}
               <li>• Introduce a creditworthy co-applicant to enhance household debt capacity.</li>
             </ul>
           </div>
@@ -190,15 +229,47 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
 
       <Tabs defaultValue={eligible ? "offer" : "summary"} className="w-full">
         <TabsList className="flex h-auto w-full flex-wrap justify-start gap-1.5 rounded-lg border border-slate-200 bg-slate-100 p-1.5 dark:border-slate-800 dark:bg-slate-800/80">
-          {eligible && <TabsTrigger value="offer" className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white">Loan Offer</TabsTrigger>}
-          {eligible && <TabsTrigger value="risk" className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white">Risk Explainability</TabsTrigger>}
-          <TabsTrigger value="policies" className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white">Applied Policies</TabsTrigger>
-          <TabsTrigger value="summary" className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white">Decision Summary</TabsTrigger>
-          <TabsTrigger value="ai" className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white">AI Compliance Narrative</TabsTrigger>
+          {eligible && (
+            <TabsTrigger
+              value="offer"
+              className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white"
+            >
+              Loan Offer
+            </TabsTrigger>
+          )}
+          {eligible && (
+            <TabsTrigger
+              value="risk"
+              className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white"
+            >
+              Risk Explainability
+            </TabsTrigger>
+          )}
+          <TabsTrigger
+            value="policies"
+            className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white"
+          >
+            Applied Policies
+          </TabsTrigger>
+          <TabsTrigger
+            value="summary"
+            className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white"
+          >
+            Decision Summary
+          </TabsTrigger>
+          <TabsTrigger
+            value="ai"
+            className="rounded-md px-3.5 py-2 text-xs font-bold text-slate-600 data-[state=active]:bg-white data-[state=active]:text-slate-900 data-[state=active]:shadow-sm dark:text-slate-400 dark:data-[state=active]:bg-slate-900 dark:data-[state=active]:text-white"
+          >
+            AI Compliance Narrative
+          </TabsTrigger>
         </TabsList>
 
         {eligible && (
-          <TabsContent value="offer" className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]">
+          <TabsContent
+            value="offer"
+            className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]"
+          >
             <div className="grid gap-6 lg:grid-cols-2">
               <div>
                 <Row label="Monthly EMI" value={inr(result.emi)} />
@@ -215,7 +286,11 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
                 </p>
                 <ResponsiveContainer width="100%" height="90%">
                   <BarChart data={repaymentData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-                    <XAxis dataKey="name" tick={{ fontSize: 12, fontWeight: 600 }} stroke="#64748b" />
+                    <XAxis
+                      dataKey="name"
+                      tick={{ fontSize: 12, fontWeight: 600 }}
+                      stroke="#64748b"
+                    />
                     <YAxis
                       tickFormatter={(v: number) => compactInr(v)}
                       tick={{ fontSize: 11, fontWeight: 600 }}
@@ -245,13 +320,18 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
         )}
 
         {eligible && (
-          <TabsContent value="risk" className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]">
+          <TabsContent
+            value="risk"
+            className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]"
+          >
             <div className="grid gap-6 lg:grid-cols-2">
               <div>
                 <Row label="Risk Assessment Tier" value={result.risk.risk_band} />
                 <Row label="Default Probability" value={pct(result.risk.default_probability)} />
                 <div className="mt-4">
-                  <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Risk Spectrum</p>
+                  <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                    Risk Spectrum
+                  </p>
                   <div className="h-3 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                     <div
                       className={`h-full transition-[width] duration-700 ${
@@ -273,8 +353,11 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
                   </div>
                 </div>
                 <p className="mt-5 flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs font-medium text-slate-600 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-300">
-                  <Info className="mt-0.5 size-4 shrink-0 text-sky-600 dark:text-sky-400" aria-hidden />
-                  Statistical machine-learning estimate calibrated against historical portfolio performance.
+                  <Info
+                    className="mt-0.5 size-4 shrink-0 text-sky-600 dark:text-sky-400"
+                    aria-hidden
+                  />
+                  Indicative model estimate using development data; it is not a credit decision.
                 </p>
               </div>
               <div className="h-64">
@@ -287,7 +370,11 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
                     data={shapData}
                     margin={{ top: 4, right: 12, bottom: 0, left: 8 }}
                   >
-                    <XAxis type="number" tick={{ fontSize: 11, fontWeight: 600 }} stroke="#64748b" />
+                    <XAxis
+                      type="number"
+                      tick={{ fontSize: 11, fontWeight: 600 }}
+                      stroke="#64748b"
+                    />
                     <YAxis
                       type="category"
                       dataKey="name"
@@ -317,10 +404,16 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
           </TabsContent>
         )}
 
-        <TabsContent value="policies" className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]">
+        <TabsContent
+          value="policies"
+          className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]"
+        >
           {result.policies.length === 0 ? (
             <div className="py-10 text-center">
-              <BadgePercent className="mx-auto size-6 text-slate-400 dark:text-slate-500" aria-hidden />
+              <BadgePercent
+                className="mx-auto size-6 text-slate-400 dark:text-slate-500"
+                aria-hidden
+              />
               <p className="mt-3 text-sm font-semibold text-slate-500 dark:text-slate-400">
                 No policy concessions apply to this profile.
               </p>
@@ -333,8 +426,12 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
                   className="flex items-start justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50/50 p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-800/50"
                 >
                   <div>
-                    <p className="text-base font-bold text-slate-900 dark:text-slate-100">{p.policy_name}</p>
-                    <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-400">{p.justification}</p>
+                    <p className="text-base font-bold text-slate-900 dark:text-slate-100">
+                      {p.policy_name}
+                    </p>
+                    <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-400">
+                      {p.justification}
+                    </p>
                   </div>
                   <span className="shrink-0 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 font-mono text-sm font-bold text-sky-700 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-300">
                     −{p.discount_percentage.toFixed(2)}%
@@ -345,21 +442,30 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
           )}
         </TabsContent>
 
-        <TabsContent value="summary" className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]">
+        <TabsContent
+          value="summary"
+          className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]"
+        >
           <div className="grid gap-6 lg:grid-cols-2">
             <div>
-              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Applicant Profile</p>
+              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Applicant Profile
+              </p>
               <Row label="Customer Reference" value={result.applicant.customer_id} />
               <Row label="Age" value={`${result.applicant.age} Years`} />
               <Row label="Gender" value={result.applicant.gender} />
               <Row label="Bureau Score" value={String(result.applicant.cibil_score)} />
-              <p className="mb-2 mt-6 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Financial Baseline</p>
+              <p className="mb-2 mt-6 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Financial Baseline
+              </p>
               <Row label="Monthly Gross Income" value={inr(result.applicant.monthly_income)} />
               <Row label="House Rent Commitment" value={inr(result.applicant.house_rent)} />
               <Row label="Existing Debt Servicing" value={inr(result.applicant.existing_emi)} />
             </div>
             <div>
-              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Underwriting Sanction</p>
+              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Underwriting Sanction
+              </p>
               <Row label="Requested Loan" value={inr(result.requested.loan_amount)} />
               <Row label="Requested Tenure" value={`${result.requested.tenure_months} Months`} />
               <Row
@@ -390,20 +496,44 @@ export function ResultsPanel({ result }: { result: LoanEvaluationResponse }) {
           </div>
         </TabsContent>
 
-        <TabsContent value="ai" className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]">
+        <TabsContent
+          value="ai"
+          className="mt-4 rounded-xl border border-slate-200/90 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]"
+        >
           <div className="space-y-6">
             {[
-              { icon: Sparkles, title: "Executive Decision Summary", body: result.explanation.executive_summary },
-              { icon: FileText, title: "Affordability & Debt Capacity Rationale", body: result.explanation.affordability_rationale },
-              { icon: BrainCircuit, title: "Risk Scoring & Pricing Strategy", body: result.explanation.risk_and_pricing_rationale },
-              { icon: ScrollText, title: "Foreclosure & Early Repayment Strategy", body: result.explanation.smart_prepayment_strategy },
+              {
+                icon: Sparkles,
+                title: "Executive Decision Summary",
+                body: result.explanation.executive_summary,
+              },
+              {
+                icon: FileText,
+                title: "Affordability & Debt Capacity Rationale",
+                body: result.explanation.affordability_rationale,
+              },
+              {
+                icon: BrainCircuit,
+                title: "Risk Scoring & Pricing Strategy",
+                body: result.explanation.risk_and_pricing_rationale,
+              },
+              {
+                icon: ScrollText,
+                title: "Foreclosure & Early Repayment Strategy",
+                body: result.explanation.smart_prepayment_strategy,
+              },
             ].map(({ icon: Icon, title, body }) => (
-              <section key={title} className="rounded-lg border border-slate-100 bg-slate-50/50 p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-800/40">
+              <section
+                key={title}
+                className="rounded-lg border border-slate-100 bg-slate-50/50 p-4 sm:p-5 dark:border-slate-800 dark:bg-slate-800/40"
+              >
                 <h3 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-slate-100">
                   <Icon className="size-4 text-sky-600 dark:text-sky-400" aria-hidden />
                   {title}
                 </h3>
-                <p className="mt-2 text-sm leading-relaxed font-medium text-slate-700 dark:text-slate-300">{body}</p>
+                <p className="mt-2 text-sm leading-relaxed font-medium text-slate-700 dark:text-slate-300">
+                  {body}
+                </p>
               </section>
             ))}
           </div>

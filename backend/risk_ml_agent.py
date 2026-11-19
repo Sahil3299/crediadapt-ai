@@ -3,6 +3,8 @@ from typing import Dict, Any
 
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import train_test_split
 
 try:
     import xgboost as xgb
@@ -46,8 +48,7 @@ class RiskMLAgent:
             "cibil_score",
             "loan_amount",
             "tenure_months",
-            "foir",
-            "gender_encoded"
+            "foir"
         ]
 
         self._train_model(data_file)
@@ -66,7 +67,6 @@ class RiskMLAgent:
         required_columns = [
             "monthly_income",
             "age",
-            "gender",
             "house_rent",
             "existing_emi",
             "cibil_score",
@@ -90,21 +90,12 @@ class RiskMLAgent:
 
         df = df.copy()
 
-        df["gender_encoded"] = (
-            df["gender"]
-            .astype(str)
-            .str.strip()
-            .str.capitalize()
-            .map({
-                "Female": 0,
-                "Male": 1,
-                "Other": 2
-            })
-            .fillna(2)
-        )
-
         X = df[self.features]
         y = df["defaulted"]
+        stratify = y if y.nunique() > 1 and y.value_counts().min() >= 2 else None
+        x_train, x_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=stratify,
+        )
 
         if xgb is not None:
             self.model = xgb.XGBClassifier(
@@ -122,7 +113,12 @@ class RiskMLAgent:
                 random_state=42
             )
 
-        self.model.fit(X, y)
+        self.model.fit(x_train, y_train)
+        if y_test.nunique() > 1:
+            auc = float(roc_auc_score(y_test, self.model.predict_proba(x_test)[:, 1]))
+            self.metrics = {"roc_auc": round(auc, 4), "test_samples": int(len(y_test))}
+        else:
+            self.metrics = {"roc_auc": None, "test_samples": int(len(y_test))}
 
         if shap is not None:
             try:
@@ -166,19 +162,6 @@ class RiskMLAgent:
                     "the requested loan is not eligible."
             }
 
-        # ---------------------------------------------------------------------
-        # GENDER
-        # ---------------------------------------------------------------------
-
-        gender_code = {
-            "Female": 0,
-            "Male": 1,
-            "Other": 2
-        }.get(
-            profile.gender.strip().capitalize(),
-            2
-        )
-
         input_data = pd.DataFrame([
             {
 
@@ -204,10 +187,7 @@ class RiskMLAgent:
                     tenure,
 
                 "foir":
-                    foir,
-
-                "gender_encoded":
-                    gender_code
+                    foir
             }
         ])
 

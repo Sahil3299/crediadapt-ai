@@ -72,7 +72,9 @@ function Section({
           <Icon className="size-4" aria-hidden />
         </span>
         <div>
-          <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 leading-tight">{title}</h3>
+          <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 leading-tight">
+            {title}
+          </h3>
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{hint}</p>
         </div>
       </div>
@@ -189,10 +191,23 @@ export function ApplicationForm({
   loading: boolean;
 }) {
   const [touched, setTouched] = useState(false);
+  const [step, setStep] = useState(0);
   const errors = validate(value);
   const shown: Errors = touched ? errors : {};
   const set = <K extends keyof LoanRequestInput>(key: K, v: LoanRequestInput[K]) =>
     onChange({ ...value, [key]: v });
+  const stepFields: (keyof LoanRequestInput)[][] = [
+    ["monthly_income", "age", "gender"],
+    ["house_rent", "existing_emi", "cibil_score"],
+    ["requested_loan", "requested_tenure", "early_closure_month"],
+  ];
+  const estimatedRate = 11.5 / 12 / 100;
+  const estimatedFactor = (1 + estimatedRate) ** value.requested_tenure;
+  const estimatedEmi =
+    value.requested_loan > 0 && value.requested_tenure > 0
+      ? (value.requested_loan * estimatedRate * estimatedFactor) / (estimatedFactor - 1)
+      : 0;
+  const stepTitles = ["Applicant profile", "Obligations & credit", "Loan request"];
 
   return (
     <form
@@ -200,139 +215,192 @@ export function ApplicationForm({
       onSubmit={(e) => {
         e.preventDefault();
         setTouched(true);
-        if (Object.keys(errors).length === 0) onSubmit();
+        const hasStepErrors = stepFields[step]?.some((field) => errors[field]);
+        if (hasStepErrors) return;
+        if (step < stepFields.length - 1) setStep((current) => current + 1);
+        else if (Object.keys(errors).length === 0) onSubmit();
       }}
       className="rounded-xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-sm dark:border-slate-800 dark:bg-[#0f172a]"
     >
       <div className="mb-5 border-b border-slate-100 dark:border-slate-800 pb-4">
-        <p className="text-xs font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">Intake Configuration</p>
-        <h2 className="mt-1 text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">Applicant Financial Profile</h2>
+        <p className="text-xs font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
+          Loan application · Step {step + 1} of {stepTitles.length}
+        </p>
+        <h2 className="mt-1 text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+          {stepTitles[step]}
+        </h2>
+        <div className="mt-3 flex gap-1" aria-label={`Step ${step + 1} of ${stepTitles.length}`}>
+          {stepTitles.map((title, index) => (
+            <span
+              key={title}
+              className={`h-1.5 flex-1 rounded-full ${index <= step ? "bg-sky-600" : "bg-slate-200 dark:bg-slate-700"}`}
+            />
+          ))}
+        </div>
       </div>
 
       <div className="space-y-6">
-        <Section icon={UserRound} title="Applicant profile" hint="Who is applying">
-          <MoneyField
-            id="monthly_income"
-            label="Monthly income"
-            value={value.monthly_income}
-            error={shown.monthly_income}
-            onChange={(v) => set("monthly_income", v)}
-          />
-          <div className="space-y-1.5">
-            <Label htmlFor="gender" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-              Gender
-            </Label>
-            <Select
-              value={value.gender}
-              onValueChange={(v) => set("gender", v as Gender)}
+        {step === 0 && (
+          <Section icon={UserRound} title="Applicant profile" hint="Who is applying">
+            <MoneyField
+              id="monthly_income"
+              label="Monthly income"
+              value={value.monthly_income}
+              error={shown.monthly_income}
+              onChange={(v) => set("monthly_income", v)}
+            />
+            <div className="space-y-1.5">
+              <Label
+                htmlFor="gender"
+                className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+              >
+                Gender
+              </Label>
+              <Select value={value.gender} onValueChange={(v) => set("gender", v as Gender)}>
+                <SelectTrigger
+                  id="gender"
+                  className="h-10 text-base font-semibold text-slate-900 border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800/90 dark:text-white"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="dark:bg-slate-900 dark:border-slate-700">
+                  <SelectItem value="Female" className="text-sm font-medium">
+                    Female
+                  </SelectItem>
+                  <SelectItem value="Male" className="text-sm font-medium">
+                    Male
+                  </SelectItem>
+                  <SelectItem value="Other" className="text-sm font-medium">
+                    Other
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="sm:col-span-2">
+              <SliderField
+                id="age"
+                label="Age"
+                value={value.age}
+                min={18}
+                max={75}
+                suffix="years"
+                error={shown.age}
+                onChange={(v) => set("age", v)}
+              />
+            </div>
+          </Section>
+        )}
+
+        {step === 1 && (
+          <>
+            <Section
+              icon={Wallet}
+              title="Financial obligations"
+              hint="Monthly commitments used for FOIR"
             >
-              <SelectTrigger id="gender" className="h-10 text-base font-semibold text-slate-900 border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800/90 dark:text-white">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="dark:bg-slate-900 dark:border-slate-700">
-                <SelectItem value="Female" className="text-sm font-medium">Female</SelectItem>
-                <SelectItem value="Male" className="text-sm font-medium">Male</SelectItem>
-                <SelectItem value="Other" className="text-sm font-medium">Other</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="sm:col-span-2">
-            <SliderField
-              id="age"
-              label="Age"
-              value={value.age}
-              min={18}
-              max={75}
-              suffix="years"
-              error={shown.age}
-              onChange={(v) => set("age", v)}
-            />
-          </div>
-        </Section>
+              <MoneyField
+                id="house_rent"
+                label="Monthly Expense"
+                value={value.house_rent}
+                error={shown.house_rent}
+                onChange={(v) => set("house_rent", v)}
+              />
+              <MoneyField
+                id="existing_emi"
+                label="Existing EMI"
+                value={value.existing_emi}
+                error={shown.existing_emi}
+                onChange={(v) => set("existing_emi", v)}
+              />
+            </Section>
 
-        <Section
-          icon={Wallet}
-          title="Financial obligations"
-          hint="Monthly commitments used for FOIR"
-        >
-          <MoneyField
-            id="house_rent"
-            label="Monthly Expense"
-            value={value.house_rent}
-            error={shown.house_rent}
-            onChange={(v) => set("house_rent", v)}
-          />
-          <MoneyField
-            id="existing_emi"
-            label="Existing EMI"
-            value={value.existing_emi}
-            error={shown.existing_emi}
-            onChange={(v) => set("existing_emi", v)}
-          />
-        </Section>
+            <Section icon={Gauge} title="Credit profile" hint="Bureau score drives pricing">
+              <div className="sm:col-span-2">
+                <SliderField
+                  id="cibil_score"
+                  label="CIBIL score"
+                  value={value.cibil_score}
+                  min={300}
+                  max={900}
+                  step={5}
+                  error={shown.cibil_score}
+                  onChange={(v) => set("cibil_score", v)}
+                />
+              </div>
+            </Section>
+          </>
+        )}
 
-        <Section icon={Gauge} title="Credit profile" hint="Bureau score drives pricing">
-          <div className="sm:col-span-2">
-            <SliderField
-              id="cibil_score"
-              label="CIBIL score"
-              value={value.cibil_score}
-              min={300}
-              max={900}
-              step={5}
-              error={shown.cibil_score}
-              onChange={(v) => set("cibil_score", v)}
-            />
-          </div>
-        </Section>
+        {step === 2 && (
+          <>
+            <Section icon={BadgeIndianRupee} title="Loan request" hint="What is being asked for">
+              <MoneyField
+                id="requested_loan"
+                label="Requested loan amount"
+                value={value.requested_loan}
+                error={shown.requested_loan}
+                onChange={(v) => set("requested_loan", v)}
+              />
+              <div className="space-y-1.5">
+                <Label
+                  htmlFor="requested_tenure"
+                  className="text-sm font-semibold text-slate-700 dark:text-slate-300"
+                >
+                  Tenure (months)
+                </Label>
+                <Input
+                  id="requested_tenure"
+                  inputMode="numeric"
+                  className="h-10 font-mono text-base font-bold text-slate-900 border-slate-200 bg-white focus-visible:ring-1 focus-visible:ring-sky-500 dark:border-slate-700 dark:bg-slate-800/90 dark:text-white"
+                  value={value.requested_tenure}
+                  aria-invalid={!!shown.requested_tenure}
+                  onChange={(e) =>
+                    set("requested_tenure", Number(e.target.value.replace(/\D/g, "")) || 0)
+                  }
+                />
+                {shown.requested_tenure ? (
+                  <p className="text-xs font-semibold text-rose-600 dark:text-rose-400">
+                    {shown.requested_tenure}
+                  </p>
+                ) : (
+                  <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    6 – 84 months
+                  </p>
+                )}
+              </div>
+            </Section>
 
-        <Section icon={BadgeIndianRupee} title="Loan request" hint="What is being asked for">
-          <MoneyField
-            id="requested_loan"
-            label="Requested loan amount"
-            value={value.requested_loan}
-            error={shown.requested_loan}
-            onChange={(v) => set("requested_loan", v)}
-          />
-          <div className="space-y-1.5">
-            <Label htmlFor="requested_tenure" className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-              Tenure (months)
-            </Label>
-            <Input
-              id="requested_tenure"
-              inputMode="numeric"
-              className="h-10 font-mono text-base font-bold text-slate-900 border-slate-200 bg-white focus-visible:ring-1 focus-visible:ring-sky-500 dark:border-slate-700 dark:bg-slate-800/90 dark:text-white"
-              value={value.requested_tenure}
-              aria-invalid={!!shown.requested_tenure}
-              onChange={(e) =>
-                set("requested_tenure", Number(e.target.value.replace(/\D/g, "")) || 0)
-              }
-            />
-            {shown.requested_tenure ? (
-              <p className="text-xs font-semibold text-rose-600 dark:text-rose-400">{shown.requested_tenure}</p>
-            ) : (
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">6 – 84 months</p>
-            )}
-          </div>
-        </Section>
-
-        <Section
-          icon={CalendarClock}
-          title="Early closure simulation"
-          hint="Model a foreclosure month"
-        >
-          <div className="sm:col-span-2">
-            <SliderField
-              id="early_closure_month"
-              label="Early closure month"
-              value={value.early_closure_month}
-              min={1}
-              max={Math.max(6, value.requested_tenure || 84)}
-              error={shown.early_closure_month}
-              onChange={(v) => set("early_closure_month", v)}
-            />
-          </div>
-        </Section>
+            <Section
+              icon={CalendarClock}
+              title="Early closure simulation"
+              hint="Model a foreclosure month"
+            >
+              <div className="sm:col-span-2">
+                <SliderField
+                  id="early_closure_month"
+                  label="Early closure month"
+                  value={value.early_closure_month}
+                  min={1}
+                  max={Math.max(6, value.requested_tenure || 84)}
+                  error={shown.early_closure_month}
+                  onChange={(v) => set("early_closure_month", v)}
+                />
+              </div>
+            </Section>
+            <div className="rounded-lg bg-sky-50 p-4 dark:bg-sky-950/30">
+              <p className="text-xs font-bold uppercase tracking-wide text-sky-800 dark:text-sky-300">
+                Indicative EMI preview
+              </p>
+              <p className="mt-1 text-xl font-bold tabular-nums text-slate-900 dark:text-white">
+                {inr(estimatedEmi)} / month
+              </p>
+              <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                Estimate at 11.5% over {value.requested_tenure || 0} months; final assessment may
+                differ.
+              </p>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="mt-7 flex flex-col gap-3 sm:flex-row">
@@ -348,16 +416,30 @@ export function ApplicationForm({
             </>
           ) : (
             <>
-              <ShieldCheck className="size-4" aria-hidden /> Evaluate Loan
+              <ShieldCheck className="size-4" aria-hidden />{" "}
+              {step < 2 ? "Continue" : "Evaluate Loan"}
             </>
           )}
         </Button>
+        {step > 0 && (
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            disabled={loading}
+            onClick={() => setStep((current) => current - 1)}
+            className="h-11"
+          >
+            Back
+          </Button>
+        )}
         <Button
           type="button"
           variant="outline"
           size="lg"
           onClick={() => {
             setTouched(false);
+            setStep(0);
             onReset();
           }}
           disabled={loading}

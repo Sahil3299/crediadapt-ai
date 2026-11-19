@@ -20,7 +20,10 @@ interface AuthPayload {
 }
 
 const SESSION_KEY = "crediadapt-session";
-const API_BASE_URL = (import.meta.env["VITE_API_BASE_URL"] || "http://localhost:8000").replace(/\/$/, "");
+const API_BASE_URL = (import.meta.env["VITE_API_BASE_URL"] || "http://localhost:8000").replace(
+  /\/$/,
+  "",
+);
 
 function apiUrl(path: string) {
   return `${API_BASE_URL}${path}`;
@@ -72,23 +75,44 @@ async function refreshSession(): Promise<AuthSession | null> {
   return { accessToken: payload.access_token, user: payload.user };
 }
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function requestResponse(path: string, init: RequestInit): Promise<Response> {
   const makeRequest = async (token?: string) => {
     const headers = new Headers(init.headers);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     if (token) headers.set("Authorization", `Bearer ${token}`);
     return fetch(apiUrl(path), { ...init, headers, credentials: "include" });
   };
-
   const session = getSession();
   let response = await makeRequest(session?.accessToken);
   if (response.status === 401 && !path.startsWith("/api/auth/")) {
     const refreshed = await refreshSession();
     if (refreshed) response = await makeRequest(refreshed.accessToken);
   }
+  return response;
+}
+
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await requestResponse(path, init);
   if (!response.ok) throw await errorFrom(response);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+export async function downloadApplicationReport(
+  applicationId: string,
+  reference?: string,
+): Promise<void> {
+  const response = await requestResponse(`/api/applications/${applicationId}/report.pdf`, {});
+  if (!response.ok) throw await errorFrom(response);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${reference ?? applicationId}-report.pdf`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function signIn(email: string, password: string, role: UserRole) {
@@ -117,7 +141,13 @@ export async function signOut() {
   }
 }
 
-export function RequireAuth({ role, children }: { role?: UserRole; children: (user: AuthUser) => ReactNode }) {
+export function RequireAuth({
+  role,
+  children,
+}: {
+  role?: UserRole;
+  children: (user: AuthUser) => ReactNode;
+}) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [checked, setChecked] = useState(false);
 
@@ -128,7 +158,9 @@ export function RequireAuth({ role, children }: { role?: UserRole; children: (us
         const currentUser = await apiRequest<AuthUser>("/api/auth/me");
         if (!active) return;
         if (role && currentUser.role !== role) {
-          window.location.replace(currentUser.role === "officer" ? "/officer/queue" : "/applications");
+          window.location.replace(
+            currentUser.role === "officer" ? "/officer/queue" : "/applications",
+          );
           return;
         }
         setUser(currentUser);
@@ -144,7 +176,11 @@ export function RequireAuth({ role, children }: { role?: UserRole; children: (us
   }, [role]);
 
   if (!checked || !user) {
-    return <div className="grid min-h-screen place-items-center text-sm text-slate-500">Checking your session…</div>;
+    return (
+      <div className="grid min-h-screen place-items-center text-sm text-slate-500">
+        Checking your session…
+      </div>
+    );
   }
   return <>{children(user)}</>;
 }

@@ -58,6 +58,11 @@ export interface LoanEvaluationResponse {
   max_foir: number;
   recommended_loan: number;
   recommended_tenure: number;
+  eligibility_path?: {
+    monthly_existing_emi_to_close: number;
+    additional_monthly_income_needed: number;
+    maximum_loan_available_today: number;
+  } | null;
   interest_rate: number;
   base_rate: number;
   emi: number;

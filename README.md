@@ -2,18 +2,18 @@
 
 CrediAdapt is a loan-underwriting workspace built with TanStack Start and FastAPI. It evaluates affordability, risk, policies, and early closure, then stores each authenticated applicant's submission in MongoDB Atlas.
 
-## Phase 1: authentication and persistence
+## Lending workflow
 
-Phase 1 is complete. It provides:
+The backend and TanStack Start frontend provide:
 
-- Applicant registration and separate applicant/officer sign-in pages.
-- Password hashing with bcrypt; 20-minute JWT access tokens and seven-day httpOnly refresh cookies.
-- Server-enforced roles and per-applicant data ownership.
-- MongoDB-backed users, applications, and append-only audit entries.
-- A persistent `SUBMITTED` application created by `POST /api/recommendations`.
-- An officer account seed script. Officer accounts cannot be created through public registration.
+- Applicant registration, separate applicant/officer sign-in, bcrypt password hashing, and 20-minute access / seven-day httpOnly refresh JWTs.
+- Server-enforced roles, per-applicant application access, and cross-site refresh cookies when `COOKIE_SECURE=true`.
+- MongoDB-backed users, applications, reviews, notifications, and append-only audit records.
+- Officer queue filters, review assignment, decisions, applicant responses, counter-offer acceptance/decline, withdrawal, and status history.
+- Applicant notifications and an authorized PDF report generated from the stored assessment.
+- Officer analytics, risk model holdout AUC, and a demographic-free risk model.
 
-The existing evaluation response fields are preserved under each application's `result` field. Policy RAG is not started by the API, so ChromaDB and sentence-transformers are not installed in the deploy dependency set.
+The existing evaluation response is preserved under each application's `result` field. The model's women-borrower concession remains a visible policy rule; gender is not used as a model feature or in synthetic risk labels. Policy RAG is not loaded by the API, so ChromaDB and sentence-transformers are excluded from the deploy dependency set.
 
 ## Prerequisites
 
@@ -27,6 +27,9 @@ The existing evaluation response fields are preserved under each application's `
 2. In **Network Access**, add your current development IP and the IP range used by your production host. Atlas will reject requests otherwise.
 3. Copy [backend/.env.example](backend/.env.example) to `backend/.env`, then set `MONGODB_URI`, `JWT_SECRET`, and `JWT_REFRESH_SECRET` to real values. Use different long random secrets for the JWT values.
 4. Copy [.env.example](.env.example) to `.env` and set `VITE_API_BASE_URL` to the FastAPI server (normally `http://localhost:8000` locally).
+5. In Render, set `ALLOWED_ORIGINS` to the exact deployed Vercel origin (for example `https://your-app.vercel.app`) and set `COOKIE_SECURE=true`. For multiple frontend domains, use comma-separated origins without trailing slashes. The refresh cookie requires `SameSite=None; Secure` across Vercel and Render.
+6. If PDF generation cannot find a font that includes the rupee symbol, install DejaVu Sans on the backend host or set `CREDIADAPT_PDF_FONT` to its absolute `.ttf` path.
+7. In Vercel, set `VITE_API_BASE_URL` to the deployed Render API URL, then redeploy the frontend after changing it.
 
 Never commit either `.env` file.
 
@@ -56,7 +59,7 @@ Run this only from a trusted terminal. The script prompts for the password, so i
 python backend/scripts/create_officer.py --email officer@example.com --name "Loan Officer"
 ```
 
-The officer can then use `/officer/login`. The Phase 1 queue confirms officers can read all submitted applications; review transitions and decisions are implemented in Phase 2.
+The officer can then use `/officer/login` to access the review queue.
 
 ## API summary
 
@@ -75,7 +78,17 @@ Authenticated endpoints:
 - `POST /api/recommendations` — applicant only; evaluates and persists a `SUBMITTED` application
 - `GET /api/recommendations/{id}`
 - `GET /api/applications`
-- `GET /api/officer/queue` — officer only; filtering and review actions arrive in Phase 2
+- `GET /api/officer/queue` — officer-only; supports status, risk band, date range, and applicant/reference search
+- `GET /api/officer/analytics` — officer-only status, risk mix, approval rate, and decision-time metrics
+- `GET /api/officer/applications/{id}` — officer-only application and applicant details
+- `POST /api/officer/applications/{id}/start-review`
+- `POST /api/officer/applications/{id}/decision` — approve, reject, counter-offer, or request information
+- `POST /api/applications/{id}/respond` — applicant information response or counter-offer response
+- `POST /api/applications/{id}/withdraw`
+- `GET /api/applications/{id}/report.pdf` — owner applicant or officer
+- `GET /api/notifications` and `POST /api/notifications/{id}/read`
+- `GET /api/audit` — officer-only, paginated, optionally filtered by application
+- `GET /api/model/metrics` — officer-only holdout ROC AUC and model feature list
 - `GET /api/explainability/{id}`
 - `GET /api/advisor/{id}`
 
@@ -87,7 +100,7 @@ npm run build
 python -m unittest discover -s backend/tests -v
 ```
 
-The backend test suite uses a MongoDB-shaped in-memory test double for auth and access-control paths; use an Atlas development cluster for the full persistence smoke test.
+The backend tests use a MongoDB-shaped in-memory test double for authentication, workflow transitions, access control, and PDF authorization. Use an Atlas development cluster for the full persistence smoke test.
 
 ## Project structure
 

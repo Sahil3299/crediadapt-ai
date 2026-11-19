@@ -46,6 +46,8 @@ def ensure_indexes() -> None:
     db.applications.create_index([("applicant_id", ASCENDING)], name="applications_applicant")
     db.applications.create_index([("status", ASCENDING)], name="applications_status")
     db.audit_logs.create_index([("application_id", ASCENDING)], name="audit_application")
+    db.reviews.create_index([("application_id", ASCENDING)], name="reviews_application")
+    db.notifications.create_index([("user_id", ASCENDING), ("created_at", -1)], name="notifications_user_created")
 
 
 def close_database() -> None:
